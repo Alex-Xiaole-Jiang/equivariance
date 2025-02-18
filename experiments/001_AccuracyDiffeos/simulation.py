@@ -1,7 +1,7 @@
 import argparse
 import sys
 sys.path.append('/vast/xj2173/diffeo/')
-from utils.diffeo_container import sparse_diffeo_container, diffeo_container
+from utils.diffeo_container import sparse_diffeo_container
 
 import torch as t
 import torch.nn as nn
@@ -37,7 +37,9 @@ def get_ImageNet(transforms = None, batch_size = 1, shuffle = False):
 def get_diffeo_container(x_range, y_range, num_of_terms, diffeo_strength_list = None, num_of_didffeo = None, res=None):
   diffeo_container = sparse_diffeo_container(res, res)
   for strength in diffeo_strength_list:
-      diffeo_container.sparse_AB_append(x_range, y_range, num_of_terms, strength, num_of_didffeo)
+      if num_of_terms == 'dense': 
+         num_el_given_range = (x_range[1] + 1) * (y_range[1] + 1) - (x_range[0]) * (y_range[0])
+      diffeo_container.sparse_AB_append(x_range, y_range, num_el_given_range, strength, num_of_didffeo)
   diffeo_container.get_all_grid()
   diffeo_container.to(device)
   return diffeo_container
@@ -60,12 +62,14 @@ def get_accuracy_for_band(model,
                           val_images, 
                           labels,
                           diffeos,
-                          batch_size):  
+                          batch_size,
+                          reference):  
 
   total_batch = batch_size[0] * batch_size[1]
 
   loss = []
   accuracy = []
+  cos_loss = []
 
   for i, (image,label) in enumerate(zip(val_images, labels)):
 
@@ -79,10 +83,11 @@ def get_accuracy_for_band(model,
 
     with t.no_grad():
       loss.append(loss_fn(output, label_view).view(batch_size[0], batch_size[1], -1))
+      cos_loss.append(nn.CosineSimilarity()(output, reference).view(batch_size[0], batch_size[1], -1))
       
     accuracy.append((pred_classes == label_view).float().view(batch_size[0], batch_size[1], -1))
 
-  return t.stack(accuracy), t.stack(loss)
+  return t.stack(accuracy), t.stack(loss), t.stack(cos_loss)
 
 
 def unpack(data, bands, metadata = None):
@@ -110,15 +115,17 @@ if __name__ == '__main__':
 
     # setting up path and config
     ImageNet_path = '/imagenet'
-    data_save_path = '/vast/xj2173/diffeo/model_accuracy'
+    data_save_path = '/vast/xj2173/equivariance/experiments/001_AccuracyDiffeos/model_accuracy'
 
     num_of_images = args.num_images
 
-    diffeo_strengths = [0, 0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175]
+    diffeo_strengths = [0, 0.00001, 0.00002, 0.00005, 0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.125, 0.15, 0.175, 0.2]
 
     num_of_diffeo = 50
 
-    diffeo_freq_band_list = [[0,5], [10,11], [20,21], [30,31], [40,41]]
+    num_of_terms_in_diffeo = 'dense'
+
+    diffeo_freq_band_list = [[0,1], [2,5], [10,11], [20,21], [30,31], [40,41]]
 
     inference_res = 224
 
@@ -145,15 +152,28 @@ if __name__ == '__main__':
     ### Save Stuff!
     acc_list = []
     los_list = []
+    cos_list = []
     for band_limit in diffeo_freq_band_list:
         batch_size = [len(diffeo_strengths), num_of_diffeo]
-        diffeos = get_diffeo_container(band_limit, band_limit, 2, diffeo_strengths, num_of_diffeo, res=inference_res)
-        accuracy, loss = get_accuracy_for_band(model, loss_fn, val_images, labels, diffeos, batch_size)
+        diffeos = get_diffeo_container(band_limit, band_limit, 
+                                       num_of_terms_in_diffeo, 
+                                       diffeo_strengths, 
+                                       num_of_diffeo, 
+                                       res=inference_res)
+        accuracy, loss, cos_loss = get_accuracy_for_band(model, 
+                                                         loss_fn, 
+                                                         val_images, 
+                                                         labels, 
+                                                         diffeos, 
+                                                         batch_size, 
+                                                         ref_out)
         acc_avg = t.mean(accuracy, dim = (0 , 2))
         loss_avg = t.mean(loss, dim = (0 , 2))
+        cos_avg = t.mean(cos_loss, dim=(0,2))
         
         acc_list.append(acc_avg.squeeze().cpu())
         los_list.append(loss_avg.squeeze().cpu())
+        cos_list.append(cos_avg.squeeze().cpu())
 
 
     metadata = {'diffeo_strengths': diffeo_strengths,
@@ -163,6 +183,8 @@ if __name__ == '__main__':
 
     acc_dict = unpack(acc_list, diffeo_freq_band_list, metadata)
     los_dict = unpack(los_list, diffeo_freq_band_list, metadata)
+    cos_dict = unpack(cos_list, diffeo_freq_band_list, metadata)
 
-    t.save(acc_dict, f'{args.model_name}_accuracy.pt')
-    t.save(acc_dict, f'{args.model_name}_loss.pt')
+    t.save(acc_dict, data_save_path + f'{args.model_name}_accuracy.pt')
+    t.save(los_dict, data_save_path + f'{args.model_name}_loss.pt')
+    t.save(cos_dict, data_save_path + f'{args.model_name}_CosLoss.pt')
